@@ -5,6 +5,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import streamlit as st
+import torch
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, UnidentifiedImageError
 from rembg import new_session, remove
 
@@ -13,6 +14,7 @@ SUPPORTED_TYPES = ["png", "jpg", "jpeg", "webp"]
 DPI_VALUE = 300
 MODEL_QUALITY = "isnet-general-use"
 MODEL_BALANCED = "u2net"
+MODEL_BEN2 = "PramaLLC/BEN2"
 PRESET_ILLUSTRATION = "Ilustrasi putih - kualitas tinggi"
 PRESET_STANDARD = "Standard rembg"
 
@@ -22,9 +24,19 @@ def get_rembg_session(model_name: str):
     return new_session(model_name)
 
 
-def output_name(filename: str) -> str:
+@st.cache_resource
+def get_ben2_model():
+    from ben2 import AutoModel
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = AutoModel.from_pretrained(MODEL_BEN2)
+    model.to(device).eval()
+    return model, device
+
+
+def output_name(filename: str, suffix: str = "no_bg") -> str:
     stem = Path(filename).stem or "image"
-    return f"{stem}_no_bg_300dpi.png"
+    return f"{stem}_{suffix}_300dpi.png"
 
 
 def ensure_image(value) -> Image.Image:
@@ -75,6 +87,7 @@ def remove_background(
     preset: str,
     white_tolerance: int,
 ) -> tuple[Image.Image, Image.Image, bytes]:
+    uploaded_file.seek(0)
     input_image = Image.open(uploaded_file).convert("RGBA")
     model_name = MODEL_QUALITY if preset == PRESET_ILLUSTRATION else MODEL_BALANCED
     session = get_rembg_session(model_name)
@@ -110,12 +123,216 @@ def remove_background(
     return output_image, final_mask, output_buffer.getvalue()
 
 
+def remove_background_ben2(uploaded_file) -> tuple[Image.Image, bytes]:
+    uploaded_file.seek(0)
+    input_image = Image.open(uploaded_file).convert("RGB")
+    model, _device = get_ben2_model()
+
+    with torch.inference_mode():
+        output_image = model.inference(input_image)
+
+    output_image = ensure_image(output_image)
+    output_buffer = BytesIO()
+    output_image.save(output_buffer, format="PNG", dpi=(DPI_VALUE, DPI_VALUE))
+    return output_image, output_buffer.getvalue()
+
+
 def build_zip(processed_images: list[dict[str, bytes]]) -> bytes:
     zip_buffer = BytesIO()
     with ZipFile(zip_buffer, "w", compression=ZIP_DEFLATED) as zip_file:
         for item in processed_images:
             zip_file.writestr(item["filename"], item["data"])
     return zip_buffer.getvalue()
+
+
+def render_rembg_tab() -> None:
+    settings_col, preview_col = st.columns([1, 1])
+    with settings_col:
+        preset = st.selectbox(
+            "Preset",
+            options=[PRESET_ILLUSTRATION, PRESET_STANDARD],
+            help="Gunakan preset ilustrasi untuk gambar di background putih agar detail bunga/dekorasi tidak mudah terhapus.",
+        )
+
+    with preview_col:
+        show_mask = st.toggle(
+            "Preview mask",
+            value=False,
+            help="Tampilkan area putih sebagai bagian yang dipertahankan dan hitam sebagai background transparan.",
+        )
+
+    white_tolerance = 18
+    if preset == PRESET_ILLUSTRATION:
+        white_tolerance = st.slider(
+            "Toleransi background putih",
+            min_value=1,
+            max_value=60,
+            value=18,
+            help="Naikkan jika background agak abu-abu/krem. Turunkan jika area putih di dalam ilustrasi ikut terbaca sebagai background.",
+        )
+
+    uploaded_files = st.file_uploader(
+        "Pilih gambar",
+        type=SUPPORTED_TYPES,
+        accept_multiple_files=True,
+        key="rembg-uploader",
+    )
+
+    if not uploaded_files:
+        st.info("Upload satu atau lebih gambar untuk mulai.")
+        return
+
+    processed_images: list[dict[str, bytes]] = []
+
+    progress = st.progress(0, text="Menyiapkan proses...")
+    for index, uploaded_file in enumerate(uploaded_files, start=1):
+        progress.progress(
+            index / len(uploaded_files),
+            text=f"Memproses {uploaded_file.name} ({index}/{len(uploaded_files)})",
+        )
+
+        try:
+            output_image, mask_image, output_bytes = remove_background(
+                uploaded_file,
+                preset=preset,
+                white_tolerance=white_tolerance,
+            )
+        except UnidentifiedImageError:
+            st.error(f"{uploaded_file.name} bukan file gambar yang valid.")
+            continue
+        except Exception as exc:
+            st.error(f"Gagal memproses {uploaded_file.name}: {exc}")
+            continue
+
+        filename = output_name(uploaded_file.name)
+        processed_images.append(
+            {
+                "filename": filename,
+                "data": output_bytes,
+            }
+        )
+
+        with st.container(border=True):
+            st.subheader(uploaded_file.name)
+            if show_mask:
+                before_col, after_col, mask_col, action_col = st.columns([1, 1, 1, 0.8])
+            else:
+                before_col, after_col, action_col = st.columns([1, 1, 0.8])
+
+            with before_col:
+                uploaded_file.seek(0)
+                st.image(uploaded_file, caption="Original", use_container_width=True)
+
+            with after_col:
+                st.image(output_image, caption="Background removed", use_container_width=True)
+
+            if show_mask:
+                with mask_col:
+                    st.image(mask_image, caption="Mask preview", use_container_width=True)
+
+            with action_col:
+                st.metric("Format", "PNG")
+                st.metric("DPI", str(DPI_VALUE))
+                st.metric("Model", MODEL_QUALITY if preset == PRESET_ILLUSTRATION else MODEL_BALANCED)
+                st.download_button(
+                    "Download hasil",
+                    data=output_bytes,
+                    file_name=filename,
+                    mime="image/png",
+                    key=f"rembg-download-{index}-{uploaded_file.name}",
+                    use_container_width=True,
+                )
+
+    progress.empty()
+
+    if processed_images:
+        st.divider()
+        st.download_button(
+            "Download semua sebagai ZIP",
+            data=build_zip(processed_images),
+            file_name="rembg_removed_backgrounds_300dpi.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+
+
+def render_ben2_tab() -> None:
+    uploaded_files = st.file_uploader(
+        "Pilih gambar",
+        type=SUPPORTED_TYPES,
+        accept_multiple_files=True,
+        key="ben2-uploader",
+    )
+
+    if not uploaded_files:
+        st.info("Upload satu atau lebih gambar untuk mulai.")
+        return
+
+    processed_images: list[dict[str, bytes]] = []
+
+    progress = st.progress(0, text="Menyiapkan model BEN2...")
+    for index, uploaded_file in enumerate(uploaded_files, start=1):
+        progress.progress(
+            index / len(uploaded_files),
+            text=f"Memproses {uploaded_file.name} dengan BEN2 ({index}/{len(uploaded_files)})",
+        )
+
+        try:
+            output_image, output_bytes = remove_background_ben2(uploaded_file)
+        except UnidentifiedImageError:
+            st.error(f"{uploaded_file.name} bukan file gambar yang valid.")
+            continue
+        except ModuleNotFoundError as exc:
+            st.error(f"Dependency BEN2 belum terpasang: {exc}")
+            st.stop()
+        except Exception as exc:
+            st.error(f"Gagal memproses {uploaded_file.name}: {exc}")
+            continue
+
+        filename = output_name(uploaded_file.name, suffix="ben2_no_bg")
+        processed_images.append(
+            {
+                "filename": filename,
+                "data": output_bytes,
+            }
+        )
+
+        with st.container(border=True):
+            st.subheader(uploaded_file.name)
+            before_col, after_col, action_col = st.columns([1, 1, 0.8])
+
+            with before_col:
+                uploaded_file.seek(0)
+                st.image(uploaded_file, caption="Original", use_container_width=True)
+
+            with after_col:
+                st.image(output_image, caption="Background removed", use_container_width=True)
+
+            with action_col:
+                st.metric("Format", "PNG")
+                st.metric("DPI", str(DPI_VALUE))
+                st.metric("Model", "BEN2")
+                st.metric("Device", "CUDA" if torch.cuda.is_available() else "CPU")
+                st.download_button(
+                    "Download hasil",
+                    data=output_bytes,
+                    file_name=filename,
+                    mime="image/png",
+                    key=f"ben2-download-{index}-{uploaded_file.name}",
+                    use_container_width=True,
+                )
+
+    progress.empty()
+
+    if processed_images:
+        st.divider()
+        st.download_button(
+            "Download semua sebagai ZIP",
+            data=build_zip(processed_images),
+            file_name="ben2_removed_backgrounds_300dpi.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
 
 
 st.set_page_config(
@@ -126,109 +343,10 @@ st.set_page_config(
 st.title("Remove Background")
 st.caption("Upload beberapa gambar, hapus background, preview hasil, lalu download PNG 300 DPI.")
 
-settings_col, preview_col = st.columns([1, 1])
-with settings_col:
-    preset = st.selectbox(
-        "Preset",
-        options=[PRESET_ILLUSTRATION, PRESET_STANDARD],
-        help="Gunakan preset ilustrasi untuk gambar di background putih agar detail bunga/dekorasi tidak mudah terhapus.",
-    )
+rembg_tab, ben2_tab = st.tabs(["rembg", "BEN2"])
 
-with preview_col:
-    show_mask = st.toggle(
-        "Preview mask",
-        value=False,
-        help="Tampilkan area putih sebagai bagian yang dipertahankan dan hitam sebagai background transparan.",
-    )
+with rembg_tab:
+    render_rembg_tab()
 
-white_tolerance = 18
-if preset == PRESET_ILLUSTRATION:
-    white_tolerance = st.slider(
-        "Toleransi background putih",
-        min_value=1,
-        max_value=60,
-        value=18,
-        help="Naikkan jika background agak abu-abu/krem. Turunkan jika area putih di dalam ilustrasi ikut terbaca sebagai background.",
-    )
-
-uploaded_files = st.file_uploader(
-    "Pilih gambar",
-    type=SUPPORTED_TYPES,
-    accept_multiple_files=True,
-)
-
-if not uploaded_files:
-    st.info("Upload satu atau lebih gambar untuk mulai.")
-    st.stop()
-
-processed_images: list[dict[str, bytes]] = []
-
-progress = st.progress(0, text="Menyiapkan proses...")
-for index, uploaded_file in enumerate(uploaded_files, start=1):
-    progress.progress(
-        index / len(uploaded_files),
-        text=f"Memproses {uploaded_file.name} ({index}/{len(uploaded_files)})",
-    )
-
-    try:
-        output_image, mask_image, output_bytes = remove_background(
-            uploaded_file,
-            preset=preset,
-            white_tolerance=white_tolerance,
-        )
-    except UnidentifiedImageError:
-        st.error(f"{uploaded_file.name} bukan file gambar yang valid.")
-        continue
-    except Exception as exc:
-        st.error(f"Gagal memproses {uploaded_file.name}: {exc}")
-        continue
-
-    processed_images.append(
-        {
-            "filename": output_name(uploaded_file.name),
-            "data": output_bytes,
-        }
-    )
-
-    with st.container(border=True):
-        st.subheader(uploaded_file.name)
-        if show_mask:
-            before_col, after_col, mask_col, action_col = st.columns([1, 1, 1, 0.8])
-        else:
-            before_col, after_col, action_col = st.columns([1, 1, 0.8])
-
-        with before_col:
-            uploaded_file.seek(0)
-            st.image(uploaded_file, caption="Original", use_container_width=True)
-
-        with after_col:
-            st.image(output_image, caption="Background removed", use_container_width=True)
-
-        if show_mask:
-            with mask_col:
-                st.image(mask_image, caption="Mask preview", use_container_width=True)
-
-        with action_col:
-            st.metric("Format", "PNG")
-            st.metric("DPI", str(DPI_VALUE))
-            st.metric("Model", MODEL_QUALITY if preset == PRESET_ILLUSTRATION else MODEL_BALANCED)
-            st.download_button(
-                "Download hasil",
-                data=output_bytes,
-                file_name=output_name(uploaded_file.name),
-                mime="image/png",
-                key=f"download-{index}-{uploaded_file.name}",
-                use_container_width=True,
-            )
-
-progress.empty()
-
-if processed_images:
-    st.divider()
-    st.download_button(
-        "Download semua sebagai ZIP",
-        data=build_zip(processed_images),
-        file_name="removed_backgrounds_300dpi.zip",
-        mime="application/zip",
-        use_container_width=True,
-    )
+with ben2_tab:
+    render_ben2_tab()
