@@ -3,3 +3,4 @@ rembg[cpu]>=2.0
 Pillow>=10.0
 torch
 git+https://github.com/PramaLLC/BEN2.git
+cv2
