@@ -5,4 +5,4 @@ nixPkgs = ["python310", "ffmpeg", "git"]
 cmds = ["pip install --no-cache-dir -r requirements.txt"]
 
 [start]
-cmd = "streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8501} --server.baseUrlPath="
+cmd = "streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8502} --server.baseUrlPath="
