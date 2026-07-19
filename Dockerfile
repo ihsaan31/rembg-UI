@@ -16,4 +16,4 @@ COPY . .
 
 EXPOSE 8502
 
-CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8502", "--server.baseUrlPath="]
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8502", "--server.baseUrlPath=", "--server.maxUploadSize=32"]

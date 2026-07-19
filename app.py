@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -12,11 +13,18 @@ from rembg import new_session, remove
 
 SUPPORTED_TYPES = ["png", "jpg", "jpeg", "webp"]
 DPI_VALUE = 300
+MAX_BATCH_FILES = 3
+MAX_BEN2_BATCH_FILES = 1
+MAX_UPLOAD_SIZE_MB = 8
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+DEFAULT_INFERENCE_SIDE = 1600
 MODEL_QUALITY = "isnet-general-use"
 MODEL_BALANCED = "u2net"
 MODEL_BEN2 = "PramaLLC/BEN2"
 PRESET_ILLUSTRATION = "Ilustrasi putih - kualitas tinggi"
 PRESET_STANDARD = "Standard rembg"
+QUALITY_STABLE = "Stabil"
+QUALITY_DETAIL = "Detail tinggi"
 
 
 @st.cache_resource
@@ -43,6 +51,58 @@ def ensure_image(value) -> Image.Image:
     if isinstance(value, Image.Image):
         return value.convert("RGBA")
     return Image.open(BytesIO(value)).convert("RGBA")
+
+
+def get_uploaded_file_size(uploaded_file) -> int:
+    size = getattr(uploaded_file, "size", None)
+    if size is not None:
+        return int(size)
+
+    current_position = uploaded_file.tell()
+    uploaded_file.seek(0, 2)
+    size = uploaded_file.tell()
+    uploaded_file.seek(current_position)
+    return size
+
+
+def validate_uploaded_files(uploaded_files, max_files: int) -> bool:
+    if len(uploaded_files) > max_files:
+        st.error(f"Maksimal {max_files} gambar per batch agar proses tidak kehabisan memori.")
+        return False
+
+    oversized_files = [
+        uploaded_file.name
+        for uploaded_file in uploaded_files
+        if get_uploaded_file_size(uploaded_file) > MAX_UPLOAD_SIZE_BYTES
+    ]
+    if oversized_files:
+        file_list = ", ".join(oversized_files)
+        st.error(f"File terlalu besar. Maksimal {MAX_UPLOAD_SIZE_MB} MB per gambar: {file_list}")
+        return False
+
+    return True
+
+
+def fit_for_inference(image: Image.Image, max_side: int) -> tuple[Image.Image, tuple[int, int]]:
+    original_size = image.size
+    if max(original_size) <= max_side:
+        return image.copy(), original_size
+
+    inference_image = image.copy()
+    inference_image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    return inference_image, original_size
+
+
+def resize_mask_to_original(mask: Image.Image, original_size: tuple[int, int]) -> Image.Image:
+    if mask.size == original_size:
+        return mask
+    return mask.resize(original_size, Image.Resampling.LANCZOS)
+
+
+def cleanup_after_image() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def build_edge_connected_white_foreground_mask(
@@ -86,19 +146,23 @@ def remove_background(
     uploaded_file,
     preset: str,
     white_tolerance: int,
+    quality_mode: str,
+    max_inference_side: int,
 ) -> tuple[Image.Image, Image.Image, bytes]:
     uploaded_file.seek(0)
     input_image = Image.open(uploaded_file).convert("RGBA")
+    inference_image, original_size = fit_for_inference(input_image, max_inference_side)
     model_name = MODEL_QUALITY if preset == PRESET_ILLUSTRATION else MODEL_BALANCED
     session = get_rembg_session(model_name)
+    use_alpha_matting = quality_mode == QUALITY_DETAIL
 
     rembg_mask = ensure_image(
         remove(
-            input_image,
+            inference_image,
             session=session,
             only_mask=True,
             post_process_mask=True,
-            alpha_matting=True,
+            alpha_matting=use_alpha_matting,
             alpha_matting_foreground_threshold=240,
             alpha_matting_background_threshold=10,
             alpha_matting_erode_size=10,
@@ -107,16 +171,17 @@ def remove_background(
 
     if preset == PRESET_ILLUSTRATION:
         white_foreground_mask = build_edge_connected_white_foreground_mask(
-            input_image,
+            inference_image,
             white_tolerance=white_tolerance,
         )
         final_mask = ImageChops.lighter(rembg_mask, white_foreground_mask)
         final_mask = final_mask.filter(ImageFilter.MedianFilter(size=3))
         final_mask = final_mask.filter(ImageFilter.GaussianBlur(radius=0.4))
-        output_image = apply_alpha_mask(input_image, final_mask)
     else:
         final_mask = rembg_mask
-        output_image = apply_alpha_mask(input_image, final_mask)
+
+    final_mask = resize_mask_to_original(final_mask, original_size)
+    output_image = apply_alpha_mask(input_image, final_mask)
 
     output_buffer = BytesIO()
     output_image.save(output_buffer, format="PNG", dpi=(DPI_VALUE, DPI_VALUE))
@@ -146,12 +211,22 @@ def build_zip(processed_images: list[dict[str, bytes]]) -> bytes:
 
 
 def render_rembg_tab() -> None:
-    settings_col, preview_col = st.columns([1, 1])
+    settings_col, quality_col, preview_col = st.columns([1, 1, 1])
     with settings_col:
         preset = st.selectbox(
             "Preset",
             options=[PRESET_ILLUSTRATION, PRESET_STANDARD],
+            index=1,
             help="Gunakan preset ilustrasi untuk gambar di background putih agar detail bunga/dekorasi tidak mudah terhapus.",
+        )
+
+    with quality_col:
+        quality_mode = st.radio(
+            "Mode kualitas",
+            options=[QUALITY_STABLE, QUALITY_DETAIL],
+            index=0,
+            horizontal=True,
+            help="Mode stabil lebih hemat memori. Detail tinggi mengaktifkan alpha matting dan lebih berat untuk VPS kecil.",
         )
 
     with preview_col:
@@ -160,6 +235,15 @@ def render_rembg_tab() -> None:
             value=False,
             help="Tampilkan area putih sebagai bagian yang dipertahankan dan hitam sebagai background transparan.",
         )
+
+    max_inference_side = st.slider(
+        "Batas sisi panjang inferensi",
+        min_value=800,
+        max_value=2400,
+        value=DEFAULT_INFERENCE_SIDE,
+        step=100,
+        help="Gambar besar diperkecil untuk proses mask lalu hasil mask dikembalikan ke ukuran original.",
+    )
 
     white_tolerance = 18
     if preset == PRESET_ILLUSTRATION:
@@ -182,6 +266,9 @@ def render_rembg_tab() -> None:
         st.info("Upload satu atau lebih gambar untuk mulai.")
         return
 
+    if not validate_uploaded_files(uploaded_files, MAX_BATCH_FILES):
+        return
+
     processed_images: list[dict[str, bytes]] = []
 
     progress = st.progress(0, text="Menyiapkan proses...")
@@ -196,12 +283,20 @@ def render_rembg_tab() -> None:
                 uploaded_file,
                 preset=preset,
                 white_tolerance=white_tolerance,
+                quality_mode=quality_mode,
+                max_inference_side=max_inference_side,
             )
         except UnidentifiedImageError:
             st.error(f"{uploaded_file.name} bukan file gambar yang valid.")
+            cleanup_after_image()
+            continue
+        except MemoryError:
+            st.error(f"Memori tidak cukup saat memproses {uploaded_file.name}. Coba kecilkan gambar atau gunakan mode Stabil.")
+            cleanup_after_image()
             continue
         except Exception as exc:
             st.error(f"Gagal memproses {uploaded_file.name}: {exc}")
+            cleanup_after_image()
             continue
 
         filename = output_name(uploaded_file.name)
@@ -234,6 +329,7 @@ def render_rembg_tab() -> None:
                 st.metric("Format", "PNG")
                 st.metric("DPI", str(DPI_VALUE))
                 st.metric("Model", MODEL_QUALITY if preset == PRESET_ILLUSTRATION else MODEL_BALANCED)
+                st.metric("Mode", quality_mode)
                 st.download_button(
                     "Download hasil",
                     data=output_bytes,
@@ -242,6 +338,9 @@ def render_rembg_tab() -> None:
                     key=f"rembg-download-{index}-{uploaded_file.name}",
                     use_container_width=True,
                 )
+
+        del output_image, mask_image, output_bytes
+        cleanup_after_image()
 
     progress.empty()
 
@@ -268,6 +367,11 @@ def render_ben2_tab() -> None:
         st.info("Upload satu atau lebih gambar untuk mulai.")
         return
 
+    if not validate_uploaded_files(uploaded_files, MAX_BEN2_BATCH_FILES):
+        return
+
+    st.warning("BEN2 memakai model besar. Untuk VPS kecil, proses satu gambar per batch agar service tidak kehabisan memori.")
+
     processed_images: list[dict[str, bytes]] = []
 
     progress = st.progress(0, text="Menyiapkan model BEN2...")
@@ -281,12 +385,19 @@ def render_ben2_tab() -> None:
             output_image, output_bytes = remove_background_ben2(uploaded_file)
         except UnidentifiedImageError:
             st.error(f"{uploaded_file.name} bukan file gambar yang valid.")
+            cleanup_after_image()
+            continue
+        except MemoryError:
+            st.error(f"Memori tidak cukup saat memproses {uploaded_file.name} dengan BEN2. Gunakan gambar lebih kecil atau tab rembg mode Stabil.")
+            cleanup_after_image()
             continue
         except ModuleNotFoundError as exc:
             st.error(f"Dependency BEN2 belum terpasang: {exc}")
+            cleanup_after_image()
             st.stop()
         except Exception as exc:
             st.error(f"Gagal memproses {uploaded_file.name}: {exc}")
+            cleanup_after_image()
             continue
 
         filename = output_name(uploaded_file.name, suffix="ben2_no_bg")
@@ -321,6 +432,9 @@ def render_ben2_tab() -> None:
                     key=f"ben2-download-{index}-{uploaded_file.name}",
                     use_container_width=True,
                 )
+
+        del output_image, output_bytes
+        cleanup_after_image()
 
     progress.empty()
 
