@@ -26,7 +26,7 @@ MAX_FAL_CACHED_RESULTS = 6
 FAL_BATCH_CONCURRENCY = 2
 MAX_UPLOAD_SIZE_MB = 8
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
-FAL_ACTION_REMOVE = "Hapus background"
+FAL_ACTION_REMOVE = "Remove background"
 FAL_ACTION_UPSCALE = "Crisp upscale"
 FAL_REMOVE_MODELS = [
     "BRIA RMBG 2.0",
@@ -57,7 +57,7 @@ def get_uploaded_file_size(uploaded_file) -> int:
 
 def validate_uploaded_files(uploaded_files) -> bool:
     if len(uploaded_files) > MAX_FAL_BATCH_FILES:
-        st.error(f"Maksimal {MAX_FAL_BATCH_FILES} gambar per batch.")
+        st.error(f"Maximum {MAX_FAL_BATCH_FILES} images per batch.")
         return False
 
     oversized_files = [
@@ -67,7 +67,7 @@ def validate_uploaded_files(uploaded_files) -> bool:
     ]
     if oversized_files:
         file_list = ", ".join(oversized_files)
-        st.error(f"File terlalu besar. Maksimal {MAX_UPLOAD_SIZE_MB} MB per gambar: {file_list}")
+        st.error(f"Files are too large. Maximum {MAX_UPLOAD_SIZE_MB} MB per image: {file_list}")
         return False
 
     return True
@@ -83,23 +83,23 @@ def build_zip(processed_images: list[dict[str, bytes]]) -> bytes:
 
 def render_fal_app() -> None:
     st.caption(
-        "Proses maksimal 3 gambar sekaligus untuk menghapus background atau menjalankan Crisp Upscale. "
-        "Dua gambar diproses paralel."
+        "Process up to 3 images at once to remove backgrounds or run Crisp Upscale. "
+        "Two images are processed in parallel."
     )
 
     with st.sidebar:
-        st.header("Pengaturan API")
+        st.header("API Settings")
         api_key = st.text_input(
             "Fal.ai API key",
             type="password",
             key="fal-api-key",
-            placeholder="Masukkan API key Fal.ai",
-            help="Key hanya digunakan di server untuk sesi Streamlit ini dan tidak disimpan ke file aplikasi.",
+            placeholder="Enter your Fal.ai API key",
+            help="The key is only used server-side for this Streamlit session and is not saved to application files.",
         )
-        st.caption("API key tetap tersimpan hanya selama sesi aplikasi ini aktif.")
+        st.caption("The API key is retained only while this application session is active.")
 
     action = st.radio(
-        "Pilih proses",
+        "Choose an action",
         options=[FAL_ACTION_REMOVE, FAL_ACTION_UPSCALE],
         horizontal=True,
         key="fal-action",
@@ -107,16 +107,16 @@ def render_fal_app() -> None:
 
     if action == FAL_ACTION_REMOVE:
         remove_model = st.selectbox(
-            "Model background remover",
+            "Background remover model",
             options=FAL_REMOVE_MODELS,
             help=(
-                "BRIA RMBG 2.0 menjadi default. BiRefNet v2 menyediakan kontrol tambahan, "
-                "sedangkan Pixelcut dioptimalkan untuk foto produk e-commerce."
+                "BRIA RMBG 2.0 is the default. BiRefNet v2 provides additional controls, "
+                "while Pixelcut is optimized for e-commerce product photos."
             ),
         )
 
         if remove_model == "BRIA RMBG 2.0":
-            st.caption("BRIA RMBG 2.0 menghapus background menggunakan model dari Bria AI.")
+            st.caption("BRIA RMBG 2.0 removes backgrounds using Bria AI's model.")
             endpoint = BRIA_REMOVE_BACKGROUND_ENDPOINT
             arguments = {"sync_mode": False}
             result_caption = "Background removed with BRIA RMBG 2.0"
@@ -125,24 +125,24 @@ def render_fal_app() -> None:
             model_col, resolution_col, refine_col = st.columns([1.3, 1, 1])
             with model_col:
                 model = st.selectbox(
-                    "Model BiRefNet",
+                    "BiRefNet model",
                     options=FAL_BIREFNET_MODELS,
-                    help="General Use (Light) direkomendasikan untuk sebagian besar gambar.",
+                    help="General Use (Light) is recommended for most images.",
                 )
             resolution_options = ["1024x1024", "2048x2048"]
             if model == "General Use (Dynamic)":
                 resolution_options.append("2304x2304")
             with resolution_col:
                 operating_resolution = st.selectbox(
-                    "Resolusi operasi",
+                    "Operating resolution",
                     options=resolution_options,
-                    help="Resolusi lebih tinggi dapat meningkatkan detail tetapi memakai lebih banyak kredit dan waktu.",
+                    help="Higher resolutions may improve detail but use more credits and take longer.",
                 )
             with refine_col:
                 refine_foreground = st.toggle(
-                    "Perhalus foreground",
+                    "Refine foreground",
                     value=True,
-                    help="Perbaiki tepi foreground menggunakan mask yang diperkirakan.",
+                    help="Improve foreground edges using the estimated mask.",
                 )
 
             endpoint = BIREFNET_ENDPOINT
@@ -159,8 +159,8 @@ def render_fal_app() -> None:
             output_suffix = "fal_birefnet_no_bg"
         else:
             st.caption(
-                "Pixelcut menghasilkan cutout produk pada kanvas persegi 1024×1024 "
-                "dengan background transparan."
+                "Pixelcut creates a product cutout on a square 1024×1024 canvas "
+                "with a transparent background."
             )
             endpoint = PIXELCUT_PRODUCT_PHOTO_ENDPOINT
             arguments = {
@@ -173,7 +173,7 @@ def render_fal_app() -> None:
             result_caption = "Background removed with Pixelcut"
             output_suffix = "fal_pixelcut_no_bg"
     else:
-        st.info("Crisp Upscale meningkatkan resolusi dan detail kecil. Safety checker tetap aktif.")
+        st.info("Crisp Upscale improves resolution and fine details. The safety checker remains enabled.")
         endpoint = CRISP_UPSCALE_ENDPOINT
         arguments = {
             "sync_mode": False,
@@ -183,18 +183,18 @@ def render_fal_app() -> None:
         output_suffix = "fal_crisp_upscaled"
 
     uploaded_files = st.file_uploader(
-        "Pilih gambar",
+        "Choose images",
         type=SUPPORTED_TYPES,
         accept_multiple_files=True,
         key="fal-uploader",
         help=(
-            f"Maksimal {MAX_FAL_BATCH_FILES} gambar. PNG, JPG, JPEG, atau WebP dengan ukuran maksimal "
-            f"{MAX_UPLOAD_SIZE_MB} MB per gambar."
+            f"Maximum {MAX_FAL_BATCH_FILES} images. PNG, JPG, JPEG, or WebP, up to "
+            f"{MAX_UPLOAD_SIZE_MB} MB per image."
         ),
     )
 
     if not uploaded_files:
-        st.info("Masukkan API key dan upload satu atau lebih gambar untuk mulai.")
+        st.info("Enter an API key and upload one or more images to get started.")
         return
 
     if not validate_uploaded_files(uploaded_files):
@@ -233,17 +233,17 @@ def render_fal_app() -> None:
 
     can_process = bool(api_key.strip()) and bool(pending_records)
     if not api_key.strip():
-        st.warning("Masukkan API key Fal.ai untuk menjalankan proses.")
+        st.warning("Enter a Fal.ai API key to run the process.")
     elif not pending_records:
-        st.success("Semua gambar dalam batch ini sudah selesai diproses.")
+        st.success("All images in this batch have already been processed.")
 
     retry_count = sum(signature in error_cache for signature in pending_records)
     if retry_count:
-        button_label = f"Coba lagi {len(pending_records)} gambar"
+        button_label = f"Retry {len(pending_records)} images"
     elif pending_records:
-        button_label = f"Proses {len(pending_records)} gambar dengan Fal.ai"
+        button_label = f"Process {len(pending_records)} images with Fal.ai"
     else:
-        button_label = "Semua gambar sudah selesai"
+        button_label = "All images are complete"
 
     if st.button(
         button_label,
@@ -256,37 +256,37 @@ def render_fal_app() -> None:
         valid_items = {}
         total_pending = len(pending_records)
         completed_count = {"value": 0}
-        progress = st.progress(0, text=f"Menyiapkan {total_pending} gambar...")
+        progress = st.progress(0, text=f"Preparing {total_pending} images...")
 
         for signature, record in pending_records.items():
             error_cache.pop(signature, None)
             try:
                 valid_items[signature] = normalize_image_to_png(record["input"])
                 status_rows[signature] = st.empty()
-                status_rows[signature].info(f'{record["name"]}: menunggu slot...')
+                status_rows[signature].info(f'{record["name"]}: waiting for a slot...')
             except (UnidentifiedImageError, OSError):
-                error_cache[signature] = "File tidak dapat dibaca sebagai gambar."
+                error_cache[signature] = "The file could not be read as an image."
                 completed_count["value"] += 1
                 progress.progress(
                     completed_count["value"] / total_pending,
-                    text=f'{record["name"]}: file tidak valid',
+                    text=f'{record["name"]}: invalid file',
                 )
 
         def on_item_state(signature: str, state: str) -> None:
             record = pending_records[signature]
             if state == "running":
-                status_rows[signature].info(f'{record["name"]}: mengirim ke Fal.ai...')
+                status_rows[signature].info(f'{record["name"]}: sending to Fal.ai...')
                 return
 
             completed_count["value"] += 1
             progress.progress(
                 completed_count["value"] / total_pending,
-                text=f'{completed_count["value"]}/{total_pending} gambar selesai',
+                text=f'{completed_count["value"]}/{total_pending} images complete',
             )
             if state == "complete":
-                status_rows[signature].success(f'{record["name"]}: selesai')
+                status_rows[signature].success(f'{record["name"]}: complete')
             else:
-                status_rows[signature].error(f'{record["name"]}: gagal')
+                status_rows[signature].error(f'{record["name"]}: failed')
 
         def on_queue_update(signature: str, update) -> None:
             logs = getattr(update, "logs", None) or []
@@ -342,10 +342,10 @@ def render_fal_app() -> None:
         )
         progress.empty()
         if successful_count:
-            st.success(f"{successful_count} gambar berhasil diproses.")
+            st.success(f"{successful_count} images processed successfully.")
         if failed_count:
             st.warning(
-                f"{failed_count} gambar gagal. Gunakan tombol coba lagi untuk memproses ulang yang gagal saja."
+                f"{failed_count} images failed. Use the retry button to process only the failed images."
             )
 
     displayed_errors = set()
@@ -378,7 +378,7 @@ def render_fal_app() -> None:
                 st.metric("Provider", "Fal.ai")
                 st.caption(cached_result["endpoint"])
                 st.download_button(
-                    "Download hasil",
+                    "Download result",
                     data=cached_result["data"],
                     file_name=record["output_filename"],
                     mime=cached_result["content_type"],
@@ -396,7 +396,7 @@ def render_fal_app() -> None:
         st.divider()
         zip_suffix = "removed_backgrounds" if action == FAL_ACTION_REMOVE else "crisp_upscaled"
         st.download_button(
-            "Download semua hasil sebagai ZIP",
+            "Download all results as ZIP",
             data=build_zip(processed_images),
             file_name=f"fal_{zip_suffix}_batch.zip",
             mime="application/zip",
