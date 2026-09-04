@@ -9,7 +9,9 @@ from PIL import UnidentifiedImageError
 
 from fal_api import (
     BIREFNET_ENDPOINT,
+    BRIA_REMOVE_BACKGROUND_ENDPOINT,
     CRISP_UPSCALE_ENDPOINT,
+    PIXELCUT_PRODUCT_PHOTO_ENDPOINT,
     build_request_signature,
     friendly_fal_error,
     normalize_image_to_png,
@@ -26,7 +28,12 @@ MAX_UPLOAD_SIZE_MB = 8
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 FAL_ACTION_REMOVE = "Hapus background"
 FAL_ACTION_UPSCALE = "Crisp upscale"
-FAL_MODELS = [
+FAL_REMOVE_MODELS = [
+    "BRIA RMBG 2.0",
+    "BiRefNet v2",
+    "Pixelcut Product Photo",
+]
+FAL_BIREFNET_MODELS = [
     "General Use (Light)",
     "General Use (Light 2K)",
     "General Use (Heavy)",
@@ -99,41 +106,72 @@ def render_fal_app() -> None:
     )
 
     if action == FAL_ACTION_REMOVE:
-        model_col, resolution_col, refine_col = st.columns([1.3, 1, 1])
-        with model_col:
-            model = st.selectbox(
-                "Model BiRefNet",
-                options=FAL_MODELS,
-                help="General Use (Light) direkomendasikan untuk sebagian besar gambar.",
-            )
-        resolution_options = ["1024x1024", "2048x2048"]
-        if model == "General Use (Dynamic)":
-            resolution_options.append("2304x2304")
-        with resolution_col:
-            operating_resolution = st.selectbox(
-                "Resolusi operasi",
-                options=resolution_options,
-                help="Resolusi lebih tinggi dapat meningkatkan detail tetapi memakai lebih banyak kredit dan waktu.",
-            )
-        with refine_col:
-            refine_foreground = st.toggle(
-                "Perhalus foreground",
-                value=True,
-                help="Perbaiki tepi foreground menggunakan mask yang diperkirakan.",
-            )
+        remove_model = st.selectbox(
+            "Model background remover",
+            options=FAL_REMOVE_MODELS,
+            help=(
+                "BRIA RMBG 2.0 menjadi default. BiRefNet v2 menyediakan kontrol tambahan, "
+                "sedangkan Pixelcut dioptimalkan untuk foto produk e-commerce."
+            ),
+        )
 
-        endpoint = BIREFNET_ENDPOINT
-        arguments = {
-            "model": model,
-            "operating_resolution": operating_resolution,
-            "output_mask": False,
-            "refine_foreground": refine_foreground,
-            "sync_mode": False,
-            "output_format": "png",
-            "mask_only": False,
-        }
-        result_caption = "Background removed"
-        output_suffix = "fal_birefnet_no_bg"
+        if remove_model == "BRIA RMBG 2.0":
+            st.caption("BRIA RMBG 2.0 menghapus background menggunakan model dari Bria AI.")
+            endpoint = BRIA_REMOVE_BACKGROUND_ENDPOINT
+            arguments = {"sync_mode": False}
+            result_caption = "Background removed with BRIA RMBG 2.0"
+            output_suffix = "fal_bria_no_bg"
+        elif remove_model == "BiRefNet v2":
+            model_col, resolution_col, refine_col = st.columns([1.3, 1, 1])
+            with model_col:
+                model = st.selectbox(
+                    "Model BiRefNet",
+                    options=FAL_BIREFNET_MODELS,
+                    help="General Use (Light) direkomendasikan untuk sebagian besar gambar.",
+                )
+            resolution_options = ["1024x1024", "2048x2048"]
+            if model == "General Use (Dynamic)":
+                resolution_options.append("2304x2304")
+            with resolution_col:
+                operating_resolution = st.selectbox(
+                    "Resolusi operasi",
+                    options=resolution_options,
+                    help="Resolusi lebih tinggi dapat meningkatkan detail tetapi memakai lebih banyak kredit dan waktu.",
+                )
+            with refine_col:
+                refine_foreground = st.toggle(
+                    "Perhalus foreground",
+                    value=True,
+                    help="Perbaiki tepi foreground menggunakan mask yang diperkirakan.",
+                )
+
+            endpoint = BIREFNET_ENDPOINT
+            arguments = {
+                "model": model,
+                "operating_resolution": operating_resolution,
+                "output_mask": False,
+                "refine_foreground": refine_foreground,
+                "sync_mode": False,
+                "output_format": "png",
+                "mask_only": False,
+            }
+            result_caption = "Background removed with BiRefNet v2"
+            output_suffix = "fal_birefnet_no_bg"
+        else:
+            st.caption(
+                "Pixelcut menghasilkan cutout produk pada kanvas persegi 1024×1024 "
+                "dengan background transparan."
+            )
+            endpoint = PIXELCUT_PRODUCT_PHOTO_ENDPOINT
+            arguments = {
+                "image_size": "square_hd",
+                "background": {"mode": "Transparent"},
+                "margin": {"all": "0%"},
+                "output_format": "png",
+                "sync_mode": False,
+            }
+            result_caption = "Background removed with Pixelcut"
+            output_suffix = "fal_pixelcut_no_bg"
     else:
         st.info("Crisp Upscale meningkatkan resolusi dan detail kecil. Safety checker tetap aktif.")
         endpoint = CRISP_UPSCALE_ENDPOINT
@@ -177,7 +215,11 @@ def render_fal_app() -> None:
                 "index": index,
                 "name": uploaded_file.name,
                 "input": uploaded_bytes,
-                "signature": build_request_signature(uploaded_bytes, action, arguments),
+                "signature": build_request_signature(
+                    uploaded_bytes,
+                    f"{action}:{endpoint}",
+                    arguments,
+                ),
                 "output_filename": output_filename,
             }
         )

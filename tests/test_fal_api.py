@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fal_api import (  # noqa: E402
     BIREFNET_ENDPOINT,
+    BRIA_REMOVE_BACKGROUND_ENDPOINT,
+    PIXELCUT_PRODUCT_PHOTO_ENDPOINT,
     FalApiError,
     FalImageResult,
     build_request_signature,
@@ -54,6 +56,18 @@ class FakeAsyncClient:
 
 
 class FalApiTests(unittest.TestCase):
+    def test_bria_remove_background_endpoint(self):
+        self.assertEqual(
+            BRIA_REMOVE_BACKGROUND_ENDPOINT,
+            "fal-ai/bria/background/remove",
+        )
+
+    def test_pixelcut_product_photo_endpoint(self):
+        self.assertEqual(
+            PIXELCUT_PRODUCT_PHOTO_ENDPOINT,
+            "pixelcut/product-photo",
+        )
+
     def test_normalizes_jpeg_to_png(self):
         source = BytesIO()
         Image.new("RGB", (12, 8), "red").save(source, format="JPEG")

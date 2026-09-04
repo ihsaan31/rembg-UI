@@ -16,6 +16,8 @@ from PIL import Image
 
 
 BIREFNET_ENDPOINT = "fal-ai/birefnet/v2"
+BRIA_REMOVE_BACKGROUND_ENDPOINT = "fal-ai/bria/background/remove"
+PIXELCUT_PRODUCT_PHOTO_ENDPOINT = "pixelcut/product-photo"
 CRISP_UPSCALE_ENDPOINT = "fal-ai/recraft/upscale/crisp"
 
 

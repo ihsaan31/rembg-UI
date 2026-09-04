@@ -26,6 +26,13 @@ class AppSmokeTests(unittest.TestCase):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
         app = AppTest.from_file(str(app_path), default_timeout=20).run()
 
+        remove_model_select = next(
+            item for item in app.selectbox if item.label == "Model background remover"
+        )
+        self.assertEqual(remove_model_select.value, "BRIA RMBG 2.0")
+        self.assertFalse(any(item.label == "Model BiRefNet" for item in app.selectbox))
+
+        remove_model_select.select("BiRefNet v2").run()
         model_select = next(item for item in app.selectbox if item.label == "Model BiRefNet")
         model_select.select("General Use (Dynamic)").run()
 
@@ -33,6 +40,37 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(
             resolution_select.options,
             ["1024x1024", "2048x2048", "2304x2304"],
+        )
+
+    def test_bria_is_default_and_hides_birefnet_controls(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        app = AppTest.from_file(str(app_path), default_timeout=20).run()
+
+        remove_model_select = next(
+            item for item in app.selectbox if item.label == "Model background remover"
+        )
+        self.assertEqual(
+            remove_model_select.options,
+            ["BRIA RMBG 2.0", "BiRefNet v2", "Pixelcut Product Photo"],
+        )
+        self.assertEqual(remove_model_select.value, "BRIA RMBG 2.0")
+        self.assertFalse(any(item.label == "Resolusi operasi" for item in app.selectbox))
+        self.assertEqual(list(app.toggle), [])
+
+    def test_pixelcut_hides_birefnet_controls(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        app = AppTest.from_file(str(app_path), default_timeout=20).run()
+
+        remove_model_select = next(
+            item for item in app.selectbox if item.label == "Model background remover"
+        )
+        remove_model_select.select("Pixelcut Product Photo").run()
+
+        self.assertFalse(any(item.label == "Model BiRefNet" for item in app.selectbox))
+        self.assertFalse(any(item.label == "Resolusi operasi" for item in app.selectbox))
+        self.assertEqual(list(app.toggle), [])
+        self.assertTrue(
+            any("background transparan" in item.value for item in app.caption)
         )
 
 

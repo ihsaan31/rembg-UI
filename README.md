@@ -4,7 +4,9 @@ Streamlit UI untuk menghapus background dan upscale gambar melalui Fal.ai. Aplik
 
 ## Fitur
 
-- Remove background melalui `fal-ai/birefnet/v2`.
+- Remove background melalui BRIA RMBG 2.0 (`fal-ai/bria/background/remove`) sebagai default.
+- BiRefNet v2 (`fal-ai/birefnet/v2`) tetap tersedia dengan pilihan model, resolusi, dan refine foreground.
+- Pixelcut Product Photo (`pixelcut/product-photo`) tersedia untuk cutout produk transparan berukuran 1024x1024.
 - Crisp Upscale melalui `fal-ai/recraft/upscale/crisp`.
 - Maksimal 3 gambar per batch dan 8 MB per gambar.
 - Maksimal 2 request Fal.ai berjalan paralel.
