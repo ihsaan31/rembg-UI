@@ -1,0 +1,78 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+body{margin:0;font:14px system-ui,sans-serif;color:#777}button,select{padding:7px 12px;cursor:pointer}button:disabled{cursor:default;opacity:.4}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}.toolbar label{display:flex;align-items:center;gap:6px}
+#viewport{position:relative;overflow:auto;scrollbar-gutter:stable;border:1px solid #8886;border-radius:6px;background:#8882;overscroll-behavior:contain}
+#stage{position:relative}canvas{position:sticky;left:0;top:0;display:block;cursor:crosshair;touch-action:none}p{margin:6px 0}
+</style></head><body><div id="content">
+<div class="toolbar"><button id="minus" aria-label="Zoom out">−</button><label>Zoom <select id="zoom"><option value="1">100%</option><option value="2">200%</option><option value="4">400%</option><option value="8">800%</option></select></label><button id="plus" aria-label="Zoom in">+</button><button id="fit">Fit</button></div>
+<div id="viewport"><div id="stage"><canvas id="canvas" aria-label="Drag frame corners or click to mark four inner corners"></canvas></div></div>
+<div class="toolbar"><button id="undo">Undo</button><button id="reset">Reset</button></div><p id="status"></p>
+<p>100% = fit width. Zoom in, then scroll to reach each corner.</p></div>
+<script>
+const canvas=document.getElementById('canvas'),ctx=canvas.getContext('2d'),viewport=document.getElementById('viewport'),stage=document.getElementById('stage'),zoomSelect=document.getElementById('zoom');
+let points=[],image=new Image(),identity='',backgroundId='',originalWidth=1,originalHeight=1,dragIndex=-1,dragStart=null,changed=false,zoom=1,scale=1,viewWidth=1,viewHeight=1;
+function send(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
+function resize(){send('streamlit:setFrameHeight',{height:Math.ceil(document.getElementById('content').getBoundingClientRect().height)+4})}
+function layout(){
+ if(!image.complete||!image.naturalWidth||!viewport.clientWidth)return;
+ viewWidth=viewport.clientWidth;
+ const fitScale=viewWidth/originalWidth;
+ viewHeight=Math.min(600,Math.max(200,originalHeight*fitScale));
+ viewport.style.height=viewHeight+'px';
+ // Reserve room for native scrollbars without changing the coordinate system.
+ viewHeight=viewport.clientHeight;viewWidth=viewport.clientWidth;
+ scale=(viewWidth/originalWidth)*zoom;
+ stage.style.width=Math.max(viewWidth,originalWidth*scale)+'px';
+ stage.style.height=Math.max(viewHeight,originalHeight*scale)+'px';
+ const dpr=window.devicePixelRatio||1;
+ canvas.width=Math.round(viewWidth*dpr);canvas.height=Math.round(viewHeight*dpr);
+ canvas.style.width=viewWidth+'px';canvas.style.height=viewHeight+'px';
+ ctx.setTransform(dpr,0,0,dpr,0,0);draw();resize();
+}
+function screenPoint([x,y]){return [x*scale-viewport.scrollLeft,y*scale-viewport.scrollTop]}
+function draw(){
+ if(!image.complete||!image.naturalWidth)return;
+ ctx.clearRect(0,0,viewWidth,viewHeight);
+ ctx.drawImage(image,-viewport.scrollLeft,-viewport.scrollTop,originalWidth*scale,originalHeight*scale);
+ if(points.length){ctx.beginPath();points.forEach((point,i)=>{const [x,y]=screenPoint(point);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});if(points.length===4)ctx.closePath();ctx.strokeStyle='#00d3ff';ctx.lineWidth=2;ctx.stroke()}
+ points.forEach((point,i)=>{const [x,y]=screenPoint(point);ctx.beginPath();ctx.arc(x,y,11,0,Math.PI*2);ctx.fillStyle='#087a98';ctx.fill();ctx.fillStyle='white';ctx.textAlign='center';ctx.textBaseline='middle';ctx.font='bold 13px sans-serif';ctx.fillText(String(i+1),x,y)});
+ document.getElementById('status').textContent=points.length+' / 4 corners selected · Drag a numbered corner to adjust';
+}
+function setZoom(value,fit=false){
+ const center=[(viewport.scrollLeft+viewWidth/2)/scale,(viewport.scrollTop+viewHeight/2)/scale];
+ zoom=Math.max(1,Math.min(8,value));zoomSelect.value=String(zoom);layout();
+ viewport.scrollLeft=fit?0:center[0]*scale-viewWidth/2;viewport.scrollTop=fit?0:center[1]*scale-viewHeight/2;
+ document.getElementById('minus').disabled=zoom===1;document.getElementById('plus').disabled=zoom===8;draw();
+}
+function update(){draw();send('streamlit:setComponentValue',{value:{points,identity,event:Date.now()+"-"+Math.random()},dataType:'json'})}
+function locationFor(e){const r=canvas.getBoundingClientRect();return [Math.max(0,Math.min(originalWidth-1,(e.clientX-r.left+viewport.scrollLeft)/scale)),Math.max(0,Math.min(originalHeight-1,(e.clientY-r.top+viewport.scrollTop)/scale))]}
+canvas.addEventListener('pointerdown',e=>{
+ if(e.button!==0)return;
+ const p=locationFor(e);
+ dragIndex=points.findIndex(([x,y])=>Math.hypot((x-p[0])*scale,(y-p[1])*scale)<20);
+ changed=false;dragStart=points.map(p=>p.slice());
+ if(dragIndex<0&&points.length<4){points.push(p);dragIndex=points.length-1;changed=true;draw()}
+ if(dragIndex>=0)canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove',e=>{if(dragIndex<0)return;points[dragIndex]=locationFor(e);changed=true;draw()});
+canvas.addEventListener('pointerup',e=>{if(dragIndex<0)return;dragIndex=-1;if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);if(changed)update()});
+canvas.addEventListener('pointercancel',()=>{if(dragStart)points=dragStart;dragIndex=-1;changed=false;draw()});
+document.getElementById('undo').onclick=()=>{points.pop();update()};
+document.getElementById('reset').onclick=()=>{points=[];update()};
+document.getElementById('minus').onclick=()=>setZoom(zoom/2);
+document.getElementById('plus').onclick=()=>setZoom(zoom*2);
+document.getElementById('fit').onclick=()=>setZoom(1,true);
+zoomSelect.onchange=()=>setZoom(Number(zoomSelect.value));viewport.addEventListener('scroll',draw);
+window.addEventListener('message',e=>{
+ if(e.data.type!=='streamlit:render')return;
+ const a=e.data.args;
+ if(identity!==a.identity){
+  const newBackground=backgroundId!==a.background_id;
+  identity=a.identity;backgroundId=a.background_id;points=(a.points||[]).map(p=>p.slice());dragIndex=-1;originalWidth=a.width;originalHeight=a.height;
+  const nextImage=new Image();nextImage.onload=()=>{if(image!==nextImage)return;layout();if(newBackground)setZoom(1,true);else draw()};image=nextImage;image.src=a.image;
+ }else{draw()}
+});
+new ResizeObserver(layout).observe(viewport);
+new ResizeObserver(resize).observe(document.getElementById('content'));
+send('streamlit:componentReady',{apiVersion:1});
+</script></body></html>

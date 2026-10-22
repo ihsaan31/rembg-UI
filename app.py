@@ -5,7 +5,7 @@ from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import streamlit as st
-from PIL import UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError
 
 from fal_api import (
     BIREFNET_ENDPOINT,
@@ -18,11 +18,13 @@ from fal_api import (
     run_fal_batch_requests,
     unique_fal_output_names,
 )
+from mockup_ui import render_painting_mockup
+from print_export import PRINT_EXPORT_VERSION, PRINT_SIZES, build_print_zip, prepare_print_source, safe_print_stem
 
 
 SUPPORTED_TYPES = ["png", "jpg", "jpeg", "webp"]
-MAX_FAL_BATCH_FILES = 3
-MAX_FAL_CACHED_RESULTS = 6
+MAX_FAL_BATCH_FILES = 10
+MAX_FAL_CACHED_RESULTS = 20
 FAL_BATCH_CONCURRENCY = 2
 MAX_UPLOAD_SIZE_MB = 8
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
@@ -81,12 +83,7 @@ def build_zip(processed_images: list[dict[str, bytes]]) -> bytes:
     return zip_buffer.getvalue()
 
 
-def render_fal_app() -> None:
-    st.caption(
-        "Process up to 3 images at once to remove backgrounds or run Crisp Upscale. "
-        "Two images are processed in parallel."
-    )
-
+def render_api_settings() -> str:
     with st.sidebar:
         st.header("API Settings")
         api_key = st.text_input(
@@ -97,6 +94,14 @@ def render_fal_app() -> None:
             help="The key is only used server-side for this Streamlit session and is not saved to application files.",
         )
         st.caption("The API key is retained only while this application session is active.")
+    return api_key
+
+
+def render_fal_app(api_key: str) -> None:
+    st.caption(
+        f"Process up to {MAX_FAL_BATCH_FILES} images per batch to remove backgrounds or run Crisp Upscale. "
+        "Two images are processed in parallel."
+    )
 
     action = st.radio(
         "Choose an action",
@@ -405,6 +410,135 @@ def render_fal_app() -> None:
         )
 
 
+def render_print_export(api_key: str) -> None:
+    st.caption(f"Upload up to {MAX_FAL_BATCH_FILES} images, then click Generate to upscale and export {len(PRINT_SIZES)} master JPG files per image.")
+    st.info(
+        "Center crop fills each print size. Orientation follows the source image; square images use portrait. "
+        "JPG files use 300 DPI pixel dimensions and metadata."
+    )
+    st.caption(
+        "Crisp Upscale runs once per image. Print sizes are then resized with Lanczos; "
+        "print detail depends on the source and upscale quality. Transparent areas become white."
+    )
+    with st.expander(f"Included print sizes ({len(PRINT_SIZES)} master JPG files per image)"):
+        for group in ("ISO", "2x3", "3x4", "4x5"):
+            labels = [
+                f"{size.label} ({size.width:g}×{size.height:g} mm)" if group == "ISO"
+                else f"{size.label} {size.unit}"
+                for size in PRINT_SIZES if size.group == group
+            ]
+            st.write(f"{group}: " + ", ".join(labels))
+
+    uploads = st.file_uploader(
+        "Choose images for print export", type=SUPPORTED_TYPES, accept_multiple_files=True,
+        key="print-uploader", help=f"Maximum {MAX_FAL_BATCH_FILES} images, {MAX_UPLOAD_SIZE_MB} MB each. PNG, JPG, JPEG, or WebP.",
+    )
+    if not uploads or not validate_uploaded_files(uploads):
+        st.session_state.pop("print-batch", None)
+        return
+
+    arguments = {"sync_mode": False, "enable_safety_checker": True}
+    records = []
+    for uploaded in uploads:
+        data = uploaded.getvalue()
+        signature = build_request_signature(
+            data, f"{FAL_ACTION_UPSCALE}:{CRISP_UPSCALE_ENDPOINT}", arguments,
+        )
+        records.append({"name": uploaded.name, "input": data, "signature": signature})
+    batch_key = tuple((record["name"], record["signature"]) for record in records)
+    if st.session_state.get("print-batch", {}).get("key") != batch_key:
+        st.session_state["print-batch"] = {"key": batch_key, "jobs": {}}
+    jobs = st.session_state["print-batch"]["jobs"]
+    for job in jobs.values():
+        if job.get("export_version") != PRINT_EXPORT_VERSION:
+            # Invalidate old packages while retaining the paid upscale result.
+            job.pop("zip", None)
+    pending = [record for record in records if "zip" not in jobs.get((record["name"], record["signature"]), {})]
+
+    if not api_key.strip():
+        st.warning("Enter a Fal.ai API key to generate print files.")
+    elif not pending:
+        st.success("All print files are ready.")
+
+    if st.button(
+        "Generate" if not jobs else "Retry incomplete images",
+        key="print-generate", type="primary", use_container_width=True,
+        disabled=not api_key.strip() or not pending,
+    ):
+        cache = st.session_state.setdefault("fal-results", {})
+        for record in pending:
+            signature = record["signature"]
+            job = jobs.setdefault((record["name"], signature), {})
+            if "zip" in job:
+                continue
+            job.pop("error", None)
+            progress = st.progress(0, text=f'{record["name"]}: preparing...')
+            try:
+                png_bytes, landscape = prepare_print_source(record["input"])
+                if "upscaled" not in job:
+                    cached = cache.get(signature)
+                    if cached is None:
+                        progress.progress(0, text=f'{record["name"]}: running Crisp Upscale...')
+                        outcome = asyncio.run(run_fal_batch_requests(
+                            api_key=api_key.strip(), endpoint=CRISP_UPSCALE_ENDPOINT,
+                            arguments=arguments, items={signature: png_bytes}, concurrency=1,
+                        ))[signature]
+                        if outcome.result is None:
+                            job["error"] = friendly_fal_error(outcome.error or RuntimeError("Missing result"))
+                            continue
+                        with Image.open(BytesIO(outcome.result.data)) as result_image:
+                            result_image.verify()
+                        cached = {
+                            "data": outcome.result.data, "content_type": outcome.result.content_type,
+                            "endpoint": CRISP_UPSCALE_ENDPOINT, "caption": "Crisp upscaled",
+                        }
+                        cache[signature] = cached
+                        while len(cache) > MAX_FAL_CACHED_RESULTS:
+                            cache.pop(next(iter(cache)))
+                    job["upscaled"] = cached["data"]
+
+                def update_progress(completed: int, total: int) -> None:
+                    progress.progress(completed / total, text=f'{record["name"]}: exporting {completed}/{total} JPG files')
+
+                job["zip"] = build_print_zip(
+                    job["upscaled"], record["name"], landscape, on_progress=update_progress,
+                )
+                job["export_version"] = PRINT_EXPORT_VERSION
+            except (UnidentifiedImageError, OSError, ValueError) as error:
+                job["error"] = f"Could not prepare or export this image: {error}"
+            except Exception:
+                job["error"] = "Processing failed. Retry this image; any completed upscale will be reused."
+            finally:
+                progress.empty()
+
+    for index, record in enumerate(records):
+        job = jobs.get((record["name"], record["signature"]), {})
+        with st.container(border=True):
+            st.subheader(record["name"])
+            before, after = st.columns(2)
+            with before:
+                try:
+                    st.image(record["input"], caption="Original", use_container_width=True)
+                except (UnidentifiedImageError, OSError, ValueError):
+                    st.error("The source file could not be previewed as an image.")
+            with after:
+                if "upscaled" in job:
+                    try:
+                        st.image(job["upscaled"], caption="Crisp upscaled", use_container_width=True)
+                    except (UnidentifiedImageError, OSError, ValueError):
+                        st.error("The upscale result could not be previewed as an image.")
+            if "error" in job:
+                st.error(job["error"])
+            if "zip" in job:
+                st.success(f"{len(PRINT_SIZES)} master JPG files ready · 300 DPI · ISO / 2x3 / 3x4 / 4x5")
+                st.download_button(
+                    "Download print ZIP", data=job["zip"],
+                    file_name=f'{safe_print_stem(record["name"])}_print_300dpi.zip',
+                    mime="application/zip", key=f"print-download-{index}-{record['signature'][:12]}",
+                    use_container_width=True,
+                )
+
+
 st.set_page_config(
     page_title="Fal AI Image Tools",
     layout="wide",
@@ -412,4 +546,12 @@ st.set_page_config(
 )
 
 st.title("Fal AI Image Tools")
-render_fal_app()
+api_key = render_api_settings()
+image_tools_tab, print_tab, mockup_tab = st.tabs(["Image Tools", "Print Size Export", "Painting Mockup"])
+with image_tools_tab:
+    render_fal_app(api_key)
+with print_tab:
+    render_print_export(api_key)
+
+with mockup_tab:
+    render_painting_mockup()

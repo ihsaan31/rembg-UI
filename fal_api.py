@@ -12,7 +12,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Awaitable, Callable, Mapping
 from urllib.request import Request, urlopen
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 BIREFNET_ENDPOINT = "fal-ai/birefnet/v2"
@@ -40,6 +40,7 @@ class FalBatchOutcome:
 
 def normalize_image_to_png(image_bytes: bytes) -> bytes:
     with Image.open(BytesIO(image_bytes)) as image:
+        image = ImageOps.exif_transpose(image)
         image.load()
         has_alpha = image.mode in {"RGBA", "LA"} or (
             image.mode == "P" and "transparency" in image.info

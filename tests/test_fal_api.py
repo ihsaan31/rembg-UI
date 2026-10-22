@@ -154,7 +154,10 @@ class FalApiTests(unittest.TestCase):
                 api_key="secret-key",
                 endpoint=BIREFNET_ENDPOINT,
                 arguments={"model": "General Use (Light)"},
-                items={"one": b"first", "two": b"bad", "three": b"third"},
+                items={
+                    "one": b"first", "two": b"bad", "three": b"third",
+                    **{f"extra-{index}": b"image" for index in range(7)},
+                },
                 concurrency=2,
                 on_item_state=lambda item_id, state: states.append((item_id, state)),
                 client_factory=lambda key: object(),
@@ -163,6 +166,8 @@ class FalApiTests(unittest.TestCase):
         )
 
         self.assertEqual(maximum_active, 2)
+        self.assertEqual(len(outcomes), 10)
+        self.assertEqual(sum(outcome.result is not None for outcome in outcomes.values()), 9)
         self.assertIsNotNone(outcomes["one"].result)
         self.assertIsInstance(outcomes["two"].error, RuntimeError)
         self.assertIsNotNone(outcomes["three"].result)
