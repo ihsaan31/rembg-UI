@@ -12,7 +12,7 @@ from PIL import Image, ImageOps
 
 
 PRINT_DPI = 300
-PRINT_EXPORT_VERSION = 2
+PRINT_EXPORT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,6 @@ def build_print_zip(
     sizes: Iterable[PrintSize] | None = None,
 ) -> bytes:
     sizes = tuple(PRINT_SIZES if sizes is None else sizes)
-    stem = safe_print_stem(source_name)
     with Image.open(BytesIO(upscaled_bytes)) as image:
         oriented = ImageOps.exif_transpose(image)
         rgba = oriented.convert("RGBA")
@@ -92,7 +91,7 @@ def build_print_zip(
                         width, height = (size.height, size.width) if landscape else (size.width, size.height)
                         label = size.label if size.group == "ISO" else f"{width:g}x{height:g}"
                         size_label = label if size.group == "ISO" else f"{label}{size.unit}"
-                        name = f"{stem}_{size.group}_{size_label}_300dpi.jpg"
+                        name = f"{size.group}_{size_label}.jpg"
                         with archive.open(name, "w") as jpg_file:
                             resized.save(jpg_file, format="JPEG", quality=95, dpi=(PRINT_DPI, PRINT_DPI))
                     finally:

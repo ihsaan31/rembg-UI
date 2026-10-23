@@ -64,10 +64,10 @@ class PrintExportTests(unittest.TestCase):
             with ZipFile(BytesIO(data)) as archive:
                 self.assertEqual(len(archive.namelist()), 1)
                 name = archive.namelist()[0]
-                self.assertTrue(name.startswith("poster_4x5_"))
+                self.assertTrue(name.startswith("4x5_"))
                 self.assertNotIn("/", name)
-                self.assertTrue(name.endswith("in_300dpi.jpg"))
-                self.assertEqual(name, f"poster_4x5_{'0.5x0.4' if landscape else '0.4x0.5'}in_300dpi.jpg")
+                self.assertTrue(name.endswith("in.jpg"))
+                self.assertEqual(name, f"4x5_{'0.5x0.4' if landscape else '0.4x0.5'}in.jpg")
                 with Image.open(BytesIO(archive.read(name))) as result:
                     self.assertEqual(result.format, "JPEG")
                     self.assertEqual(result.mode, "RGB")
@@ -98,8 +98,8 @@ class PrintExportTests(unittest.TestCase):
         self.assertEqual(progress, [(i, 4) for i in range(1, 5)])
         with ZipFile(BytesIO(data)) as archive:
             self.assertEqual(archive.namelist(), [
-                "poster_ISO_A1_300dpi.jpg", "poster_2x3_24x36in_300dpi.jpg",
-                "poster_3x4_24x32in_300dpi.jpg", "poster_4x5_24x30in_300dpi.jpg",
+                "ISO_A1.jpg", "2x3_24x36in.jpg",
+                "3x4_24x32in.jpg", "4x5_24x30in.jpg",
             ])
             self.assertIsNone(archive.testzip())
             for name in archive.namelist():
@@ -175,7 +175,10 @@ class PrintAppTests(unittest.TestCase):
             self.start()
             batch = self.app.session_state["print-batch"]
             record_key = batch["key"][0]
-            batch["jobs"][record_key] = {"zip": b"old 35-file zip", "upscaled": image_bytes()}
+            batch["jobs"][record_key] = {
+                "zip": b"old long-filename zip", "upscaled": image_bytes(),
+                "export_version": PRINT_EXPORT_VERSION - 1,
+            }
             self.app.session_state["print-batch"] = batch
             self.app.run()
             self.assertEqual(len(self.app.get("download_button")), 0)
