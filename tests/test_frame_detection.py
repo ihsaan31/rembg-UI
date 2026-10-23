@@ -109,8 +109,10 @@ class AutoFrameAppTests(unittest.TestCase):
             self.assertFalse(self.app.button(key="mockup-generate").disabled)
             self.app.button(key="mockup-generate").click().run()
             self.assertEqual(list(self.app.exception), [])
-            self.assertEqual(len(self.app.session_state["mockup-results"]), 18)
-            self.assertEqual(len(self.app.get("download_button")), 19)
+            results = self.app.session_state["mockup-results"]
+            self.assertEqual(len(results), 1)
+            self.assertEqual(len(results[0]["entries"]), 18)
+            self.assertEqual(len(self.app.get("download_button")), 20)
             # Select the first image explicitly: initial selection now prioritizes failures.
             self.app.selectbox(key="mockup-selected-background").select(0).run()
             # A manual adjustment invalidates old output, then survives revisiting the editor.

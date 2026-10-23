@@ -5,7 +5,8 @@ import base64
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
-from zipfile import ZipFile, ZIP_DEFLATED
+from tempfile import TemporaryFile
+from zipfile import ZipFile, ZIP_DEFLATED, ZIP_STORED
 
 from PIL import Image, ImageDraw, UnidentifiedImageError
 import streamlit as st
@@ -18,8 +19,11 @@ from print_export import safe_print_stem
 
 corner_canvas = components.declare_component("painting_corner_canvas", path=str(Path(__file__).parent / "mockup_canvas"))
 
+MAX_PAINTINGS = 50
+MAX_BACKGROUNDS = 20
 
-def read_uploads(uploads, max_files=3):
+
+def read_uploads(uploads, max_files=MAX_PAINTINGS):
     if len(uploads) > max_files:
         st.error(f"Maximum {max_files} images per uploader.")
         return None
@@ -36,6 +40,50 @@ def read_uploads(uploads, max_files=3):
             return None
         records.append({"name": upload.name, "data": data, "id": sha256(data).hexdigest(), "size": image.size, "index": index})
     return records
+
+
+def generate_mockup_archives(backgrounds, paintings, saved_points, on_progress):
+    """Keep one ZIP per painting, with metadata instead of duplicate PNG bytes."""
+    groups = []
+    total = len(backgrounds) * len(paintings)
+    processed = 0
+    for art in paintings:
+        group = {
+            "filename": f'{art["index"]+1:02d}_{safe_print_stem(art["name"])}.zip',
+            "label": f'{art["index"]+1}. {art["name"]}',
+            "entries": [], "errors": [],
+        }
+        with TemporaryFile() as archive_file:
+            with ZipFile(archive_file, "w", compression=ZIP_DEFLATED) as archive:
+                for bg in backgrounds:
+                    filename = f'{bg["index"]+1:02d}_{safe_print_stem(bg["name"])}.png'
+                    try:
+                        data = compose_mockup(bg["data"], art["data"], saved_points[bg["id"]])
+                        archive.writestr(filename, data)
+                        group["entries"].append({"filename": filename, "label": f'{bg["name"]} × {art["name"]}'})
+                        del data
+                    except Exception:
+                        group["errors"].append(f'Could not create {bg["name"]} × {art["name"]}. Try again.')
+                    processed += 1
+                    on_progress(processed, total)
+            if group["entries"]:
+                archive_file.seek(0)
+                group["data"] = archive_file.read()
+        groups.append(group)
+    return groups
+
+
+def combine_mockup_archives(groups):
+    """Bundle successful painting ZIPs without recompressing their contents."""
+    successful = [group for group in groups if group["entries"]]
+    if not successful:
+        return None
+    with TemporaryFile() as archive_file:
+        with ZipFile(archive_file, "w", compression=ZIP_STORED) as archive:
+            for group in successful:
+                archive.writestr(group["filename"], group["data"])
+        archive_file.seek(0)
+        return archive_file.read()
 
 
 def correction_indices(backgrounds, saved_points):
@@ -68,17 +116,17 @@ def cancel_background_removal():
 
 
 def render_painting_mockup():
-    st.caption("Upload up to 20 backgrounds and 3 paintings to create every combination locally. No API key needed.")
+    st.caption(f"Upload up to {MAX_BACKGROUNDS} backgrounds and {MAX_PAINTINGS} paintings to create every combination locally. Download all painting ZIPs in one click. No API key needed.")
     st.info("Blank white frame interiors are detected automatically. Review the outlined areas below; open Correct frame corners if needed. Paintings use a center crop and transparent areas become white.")
     store = render_collection_controls()
     uploader_epoch = st.session_state.get("mockup-uploader-epoch", 0)
     upload_suffix = f"-{uploader_epoch}" if uploader_epoch else ""
     left, right = st.columns(2)
     with left:
-        background_uploads = st.file_uploader("Background images", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key=f"mockup-backgrounds{upload_suffix}", help="Up to 20 images, 8 MB and 24 megapixels each.")
+        background_uploads = st.file_uploader("Background images", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key=f"mockup-backgrounds{upload_suffix}", help=f"Up to {MAX_BACKGROUNDS} images, 8 MB and 24 megapixels each.")
     with right:
-        painting_uploads = st.file_uploader("Painting images", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key=f"mockup-paintings{upload_suffix}", help="Up to 3 images, 8 MB and 24 megapixels each.")
-    uploads = read_uploads(background_uploads or [], max_files=20)
+        painting_uploads = st.file_uploader("Painting images", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key=f"mockup-paintings{upload_suffix}", help=f"Up to {MAX_PAINTINGS} images, 8 MB and 24 megapixels each.")
+    uploads = read_uploads(background_uploads or [], max_files=MAX_BACKGROUNDS)
     if st.session_state.get("mockup-collection-code"):
         backgrounds = st.session_state.setdefault("mockup-background-records", [])
         consumed = st.session_state.setdefault("mockup-consumed-uploads", set())
@@ -89,14 +137,14 @@ def render_painting_mockup():
             rejected = []
             for bg in uploads:
                 if bg["id"] not in consumed and bg["id"] not in known_ids:
-                    if len(backgrounds) < 20:
+                    if len(backgrounds) < MAX_BACKGROUNDS:
                         backgrounds.append(bg)
                         known_ids.add(bg["id"])
                     else:
                         rejected.append(bg["name"])
             consumed.update(upload_ids)
             if rejected:
-                st.error("Koleksi maksimal 20 background. Tidak ditambahkan: " + ", ".join(rejected))
+                st.error(f"Koleksi maksimal {MAX_BACKGROUNDS} background. Tidak ditambahkan: " + ", ".join(rejected))
     else:
         backgrounds = uploads
         if backgrounds is not None:
@@ -117,6 +165,7 @@ def render_painting_mockup():
                     del state[old_id]
     if not backgrounds or paintings is None:
         st.session_state.pop("mockup-results", None)
+        st.session_state.pop("mockup-all-zip", None)
         st.session_state.pop("mockup-result-key", None)
         if backgrounds is not None:
             autosave_collection(store, backgrounds, saved_points, detections)
@@ -240,38 +289,42 @@ def render_painting_mockup():
     st.caption(f"{len(ready_backgrounds)}/{len(backgrounds)} backgrounds ready. Review the outlines before generating.")
     if not paintings:
         st.info("Upload paintings to generate mockups. Frame selections are retained.")
-    batch_key = repr(([(r["name"], r["id"], saved_points.get(r["id"], [])) for r in backgrounds], [(r["name"], r["id"]) for r in paintings]))
+    batch_key = repr(("zip-per-painting-v1", [(r["name"], r["id"], saved_points.get(r["id"], [])) for r in backgrounds], [(r["name"], r["id"]) for r in paintings]))
     if st.session_state.get("mockup-result-key") != batch_key:
         st.session_state.pop("mockup-results", None)
+        st.session_state.pop("mockup-all-zip", None)
     total = len(ready_backgrounds) * len(paintings)
     if st.button(f"Generate {total} Mockups", disabled=not ready_backgrounds or not paintings, type="primary", key="mockup-generate"):
-        results = []
+        st.session_state.pop("mockup-results", None)
+        st.session_state.pop("mockup-all-zip", None)
         progress = st.progress(0, text="Creating mockups...")
-        for bg in ready_backgrounds:
-            for art in paintings:
-                filename = f'{bg["index"]+1:02d}_{safe_print_stem(bg["name"])}__{art["index"]+1:02d}_{safe_print_stem(art["name"])}.png'
-                try:
-                    data = compose_mockup(bg["data"], art["data"], saved_points[bg["id"]])
-                    results.append({"filename": filename, "data": data, "label": f'{bg["name"]} × {art["name"]}'})
-                except Exception:
-                    results.append({"filename": filename, "error": f'Could not create {bg["name"]} × {art["name"]}. Try again.'})
-                progress.progress(len(results) / total, text=f"{len(results)}/{total} mockups processed")
+        results = generate_mockup_archives(
+            ready_backgrounds, paintings, saved_points,
+            lambda done, count: progress.progress(done / count, text=f"{done}/{count} mockups processed"),
+        )
         progress.empty()
         st.session_state["mockup-result-key"] = batch_key
         st.session_state["mockup-results"] = results
     results = st.session_state.get("mockup-results", [])
     successful = []
-    for index, result in enumerate(results):
-        if "error" in result:
-            st.error(result["error"])
+    for result in results:
+        for error in result["errors"]:
+            st.error(error)
+        if not result["entries"]:
             continue
         successful.append(result)
-        with st.container(border=True):
-            st.image(result["data"], caption=result["label"], use_container_width=True)
-            st.download_button("Download mockup", data=result["data"], file_name=result["filename"], mime="image/png", key=f"mockup-download-{index}")
     if successful:
-        archive = BytesIO()
-        with ZipFile(archive, "w", compression=ZIP_DEFLATED) as output:
-            for result in successful:
-                output.writestr(result["filename"], result["data"])
-        st.download_button("Download all mockups as ZIP", data=archive.getvalue(), file_name="painting_mockups.zip", mime="application/zip", key="mockup-zip")
+        if "mockup-all-zip" not in st.session_state:
+            st.session_state["mockup-all-zip"] = combine_mockup_archives(successful)
+        st.download_button("Download all mockups", data=st.session_state["mockup-all-zip"], file_name="painting_mockups.zip", mime="application/zip", type="primary", key="mockup-download-all")
+        for index, result in enumerate(results):
+            if result["entries"]:
+                st.download_button(f'Download {result["label"]} ZIP ({len(result["entries"])} mockups)', data=result["data"], file_name=result["filename"], mime="application/zip", key=f"mockup-zip-{index}")
+        selected = st.selectbox("Preview painting", options=[group["filename"] for group in successful], key="mockup-preview-painting")
+        group = next(group for group in successful if group["filename"] == selected)
+        with ZipFile(BytesIO(group["data"])) as archive:
+            for index, entry in enumerate(group["entries"]):
+                data = archive.read(entry["filename"])
+                with st.container(border=True):
+                    st.image(data, caption=entry["label"], use_container_width=True)
+                    st.download_button("Download mockup", data=data, file_name=entry["filename"], mime="image/png", key=f'mockup-download-{selected}-{index}')
